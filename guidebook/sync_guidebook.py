@@ -82,7 +82,7 @@ class GuideBook:
 
     COLOR_MAP = {
         "Applied Science": "#dddddd",
-        "Astricon": "#8b4789",
+        "AstriCon": "#8b4789",
         "BoFs": "#ffbc00",
         "Career Day": "#dddddd",  # Open Source Career Day
         "Cloud Native": "#638dce",  # Cloud Native Days

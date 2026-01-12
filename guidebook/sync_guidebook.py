@@ -173,12 +173,24 @@ class GuideBook:
 
     def get_x_map_id(self):
         response = requests.get(
-            self.URLS["x-maps"], headers=self.x_headers
+            self.URLS["x-maps"] + "?guide=%d" % self.guide,
+            headers=self.x_headers,
         ).json()
         for r in response["results"]:
             if r["name"]["en-US"] == self.REGIONED_MAP:
+                self.logger.debug(
+                    "Found map '%s' with id=%d for guide=%d",
+                    self.REGIONED_MAP,
+                    r["id"],
+                    self.guide,
+                )
                 return r["id"]
-        self.logger.critical("ERROR: Did not find expected map")
+        self.logger.critical(
+            "ERROR: Did not find expected map '%s' for guide %d",
+            self.REGIONED_MAP,
+            self.guide,
+        )
+        sys.exit(1)
 
     def get_things(self, thing):
         """
@@ -307,7 +319,7 @@ class GuideBook:
         }
         self.add_thing("x-map-regions", name, data, update, rid)
 
-    def get_x_map_region_for_room(self, room):
+    def get_x_map_region_for_room(self, location_id):
         return next(
             (
                 reg
@@ -315,7 +327,7 @@ class GuideBook:
                 if (
                     reg["location"] is not None
                     and "name" in reg["location"]
-                    and reg["location"]["id"] == room
+                    and reg["location"]["id"] == location_id
                 )
             ),
             None,
@@ -333,12 +345,11 @@ class GuideBook:
                 continue
             update = False
             rid = None
-            guidebook_map_region = self.get_x_map_region_for_room(room)
+            location_id = self.x_rooms[room]["id"]
+            guidebook_map_region = self.get_x_map_region_for_room(location_id)
             if guidebook_map_region:
                 update = True
                 rid = guidebook_map_region["id"]
-
-            location_id = self.x_rooms[room]["id"]
 
             if self.update:
                 # Update room's Guidebook location to work the map region.

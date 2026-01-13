@@ -78,6 +78,7 @@ class GuideBook:
         "x-rooms": "https://builder.guidebook.com/api/locations/",
         "x-maps": "https://builder.guidebook.com/api/maps/",
         "x-map-regions": "https://builder.guidebook.com/api/map-regions/",
+        "publish": "https://builder.guidebook.com/api/guides/{guide}/publish/",
     }
 
     COLOR_MAP = {
@@ -493,6 +494,27 @@ class GuideBook:
         self.delete_tracks()
         self.delete_rooms()
 
+    def publish_updates(self):
+        response = requests.post(
+            self.URLS["publish"].format(guide=self.guide),
+            headers=self.x_headers,
+        )
+
+        if response.status_code == 204:
+            return
+
+        if (
+            response.status_code == 403
+            and "no new content" in resp.text.lower()
+        ):
+            self.logger.info("No changes to publish")
+            return
+
+        self.logger.error("Failed to publish")
+        self.logger.error("Status: %s" % response.status_code)
+        self.logger.error("Body: %s" % response.text)
+        sys.exit(1)
+
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
@@ -559,6 +581,8 @@ def main(debug, update, delete_all, csv_file, api_file, x_api_file):
         ourguide.setup_sessions(ourdata.sessions)
         if x_key:
             ourguide.setup_x_map_regions()
+            # unclear exactly when this is needed.
+            ourguide.publish_updates()
 
 
 if __name__ == "__main__":

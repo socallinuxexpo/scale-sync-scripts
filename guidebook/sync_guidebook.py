@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 #
-# Copyright 2018 Southern California Linux Expo
+# Copyright 2018-present Southern California Linux Expo
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,54 +18,70 @@
 
 #
 # Author:: Phil Dibowitz <phil@ipm.com>
-# This is quick-n-dirty script to import a CSV export from the SCALE
-# website into Guidebook. By default it'll add only what's missing, but
-# can optionally update all existing sessions.
+#
+# Script to sync the website schedule to Guidebook complete with region
+# mapping.
+#
+# By default it'll add only what's missing, but can optionally update all
+# existing sessions.
 #
 # It automatically setups rooms ("Locations") and tracks. It has a hard-coded
 # map of colors in the Guidebook class, so if you change tracks you'll need
 # to update that.
 #
 
+from datetime import datetime
 import click
-import csv
+import json
 import logging
+import os
+import pytz
+import re
 import requests
 import sys
-import pytz
-from datetime import datetime
 
-DBASE_DEFAULT = "/tmp/presentation_exporter_event_1967.csv"
+try:
+    import xdg_base_dirs as xdg
+except ImportError:
+    import xdg
+
+DBASE_DEFAULT = "https://www.socallinuxexpo.org/scale/23x/app"
 GUIDE_NAME = "SCaLE 23x"
 
 
-class OurCSV:
+class OurJSON:
     rooms = set()
     tracks = set()
     sessions = set()
 
     FIELD_MAPPING = {
-        "tracks": "Session Track",
-        "rooms": "Room/Location",
+        "tracks": "Track",
+        "rooms": "Location",
     }
 
-    def __init__(self, dbase, logger):
+    def __init__(self, path, logger):
         self.logger = logger
-        self.sessions = self.load_csv(dbase)
+        if path.startswith("http://") or path.startswith("https://"):
+            response = requests.get(path)
+            blob = response.text
+            self.sessions = self.load_json(blob)
+        else:
+            blob = open(path, "r").read()
+            self.session = self.load_json(blob)
 
-    def load_csv(self, filename):
-        self.logger.info("Loading CSV file")
+    def load_json(self, raw):
+        self.logger.info("Loading JSON file")
+        raw = json.loads(raw)
         data = []
-        with open(filename, "r", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile, delimiter=",", quotechar='"')
-            for row in reader:
-                track = row[self.FIELD_MAPPING["tracks"]]
-                room = row[self.FIELD_MAPPING["rooms"]]
-                if track != "":
-                    self.tracks.add(track)
-                if room != "":
-                    self.rooms.add(room)
-                data.append(row)
+        for session in raw:
+            track = session[self.FIELD_MAPPING["tracks"]].strip()
+            room = session[self.FIELD_MAPPING["rooms"]].strip()
+            if track != "":
+                self.tracks.add(track)
+            if room != "":
+                self.rooms.add(room)
+            clean_session = {k: v.strip() for k, v in session.items()}
+            data.append(clean_session)
         return data
 
 
@@ -366,28 +382,29 @@ class GuideBook:
 
             self.add_x_map_region(map_region, update, rid, location_id)
 
-    def to_utc(self, ts):
-        loc_dt = datetime.strptime(ts, "%Y-%m-%d %H:%M")
-        pt_dt = pytz.timezone("America/Los_Angeles").localize(loc_dt)
+    def to_utc(self, ts, fmt):
+        loc_dt = datetime.strptime(ts, fmt)
+        if not fmt.endswith("%z"):
+            pt_dt = pytz.timezone("America/Los_Angeles").localize(loc_dt)
+        else:
+            pt_dt = loc_dt
         return pt_dt.astimezone(pytz.utc)
 
     def get_times(self, session):
         """
         Helper function to build times for guidebook.
         """
-        d = session["Date"].split()[1]
-        month, date, year = d.split("/")
 
-        start_ts = "%s-%s-%s %s" % (year, month, date, session["Time Start"])
-
-        end_ts = "%s-%s-%s %s" % (year, month, date, session["Time End"])
-        return (self.to_utc(start_ts), self.to_utc(end_ts))
+        fmt = "%Y-%m-%dT%H:%M:%S%z"
+        start_ts = session["StartTime"]
+        end_ts = session["EndTime"]
+        return (self.to_utc(start_ts, fmt), self.to_utc(end_ts, fmt))
 
     def get_id(self, thing, session):
         """
         Get the ID for <thing> where thing is a room or track
         """
-        key = OurCSV.FIELD_MAPPING[thing]
+        key = OurJSON.FIELD_MAPPING[thing]
         if session[key] == "":
             return []
         self.logger.debug(
@@ -410,14 +427,14 @@ class GuideBook:
         """
         if update and not self.update:
             return
-        name = session["Session Title"]
+        name = session["Name"]
         start, end = self.get_times(session)
         data = {
             "name": name,
             "start_time": start,
             "end_time": end,
             "guide": self.guide,
-            "description_html": "<p>%s</p>" % session["Description"],
+            "description_html": session["LongAbstract"],
             "schedule_tracks": self.get_id("tracks", session),
             "locations": self.get_id("rooms", session),
             "add_to_schedule": True,
@@ -432,10 +449,10 @@ class GuideBook:
         Add all rooms passed in if missing.
         """
         for session in sessions:
-            name = session["Session Title"]
+            name = session["Name"]
             update = False
             sid = None
-            if session["Date"] == "":
+            if session["StartTime"] == "":
                 self.logger.warning("Skipping %s - no date" % name)
                 continue
             if name in self.sessions:
@@ -495,25 +512,49 @@ class GuideBook:
         self.delete_rooms()
 
     def publish_updates(self):
+        self.logger.info("Publishing changes")
         response = requests.post(
             self.URLS["publish"].format(guide=self.guide),
             headers=self.x_headers,
         )
 
-        if response.status_code == 204:
+        if response.status_code == 202:
+            self.logger.debug("Publish accepted")
             return
 
-        if (
-            response.status_code == 403
-            and "no new content" in resp.text.lower()
-        ):
-            self.logger.info("No changes to publish")
-            return
+        if response.status_code == 403:
+            resp_text = response.text.lower()
+            if "no new content" in resp_text:
+                self.logger.debug("No changes to publish")
+                return
+            elif "currently publishing" in resp_text:
+                self.logger.debug("Guidebook is already publishing")
+                return
 
         self.logger.error("Failed to publish")
         self.logger.error("Status: %s" % response.status_code)
         self.logger.error("Body: %s" % response.text)
         sys.exit(1)
+
+
+def _get_token(fname, ename, logger):
+    env_token = os.getenv(ename)
+    if env_token is not None:
+        return env_token.strip()
+    for dir in xdg.xdg_config_dirs():
+        api_file = os.path.join(dir, fname)
+        if os.path.isfile(api_file):
+            logger.debug("Using %s from %s" % (ename, api_file))
+            return open(api_file, "r").read().strip()
+
+
+def get_tokens(logger):
+    key = _get_token("guidebook_api_token", "GUIDEBOOK_API_TOKEN", logger)
+    if not key:
+        logger.critical("No API file specified. See help for details.")
+        sys.exit(1)
+    x_key = _get_token("guidebook_jwt_token", "GUIDEBOOK_JWT_TOKEN", logger)
+    return (key, x_key)
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -531,20 +572,29 @@ class GuideBook:
     default=False,
     help="Delete all tracks, rooms, and sessions",
 )
-@click.option("--csv-file", default=DBASE_DEFAULT, help="CSV file to use.")
 @click.option(
-    "--api-file",
-    "-a",
-    default="guidebook_api.txt",
-    help="File to read API key from",
+    "--json",
+    "feed",
+    metavar="FILE_OR_URL",
+    default=DBASE_DEFAULT,
+    help="JSON file or http(s) URL to JSON data.",
 )
-@click.option(
-    "--x-api-file",
-    "-x",
-    default="guidebook_api_x.txt",
-    help="File to read API key from",
-)
-def main(debug, update, delete_all, csv_file, api_file, x_api_file):
+def main(debug, update, delete_all, feed):
+    """
+    Sync the schedule data from our website to Guidebook.
+
+    AUTHENTICATION
+
+    The Guidebook API token must be provided either via the GUIDEBOOK_API_TOKEN
+    environment variable, or via a file named 'guidebook_api_token' located in
+    one of the standard XDG config directories (e.g. ~/.config/).
+
+    Optionally, a Guidebook JWT token may be provided via the
+    GUIDEBOOK_JWT_TOKEN environment variable or a file named
+    'guidebook_jwt_token' located in one of the standard XDG config
+    directories. This token is needed for certain operations such as setting up
+    X Map regions and publishing.
+    """
     level = logging.INFO
     if debug:
         level = logging.DEBUG
@@ -555,14 +605,7 @@ def main(debug, update, delete_all, csv_file, api_file, x_api_file):
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    with open(api_file, "r") as api:
-        key = api.read().strip()
-
-    try:
-        with open(x_api_file, "r") as api:
-            x_key = api.read().strip()
-    except IOError:
-        x_key = None
+    (key, x_key) = get_tokens(logger)
 
     if delete_all:
         print("WARNING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")  # noqa: E999
@@ -570,7 +613,7 @@ def main(debug, update, delete_all, csv_file, api_file, x_api_file):
         print("into a schedule to lose all of that work.")
         click.confirm("ARE YOU FUCKING SURE?!", abort=True)
     else:
-        ourdata = OurCSV(csv_file, logger)
+        ourdata = OurJSON(feed, logger)
 
     ourguide = GuideBook(logger, update, key, x_key=x_key)
     if delete_all:

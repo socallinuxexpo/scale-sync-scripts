@@ -1,2 +1,4 @@
 click
 requests
+pytz
+xdg-base-dirs

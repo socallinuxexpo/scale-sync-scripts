@@ -27,4 +27,4 @@ jobs:
           GUIDEBOOK_API_TOKEN: ${{ secrets.GUIDEBOOK_API_TOKEN }}
           GUIDEBOOK_JWT_TOKEN: ${{ secrets.GUIDEBOOK_JWT_TOKEN }}
         run: |
-          python ./guidebook_sync/sync_guidebook.py
+          python ./guidebook/sync_guidebook.py

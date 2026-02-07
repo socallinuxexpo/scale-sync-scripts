@@ -52,7 +52,8 @@ GUIDE_NAME = "SCaLE 23x"
 class OurJSON:
     rooms = set()
     tracks = set()
-    sessions = set()
+    sessions_by_name = {}
+    sessions_by_nid = {}
 
     FIELD_MAPPING = {
         "tracks": "Track",
@@ -64,16 +65,19 @@ class OurJSON:
         if path.startswith("http://") or path.startswith("https://"):
             response = requests.get(path)
             blob = response.text
-            self.sessions = self.load_json(blob)
         else:
             blob = open(path, "r").read()
-            self.session = self.load_json(blob)
+        self.sessions_by_name, self.sessions_by_nid = self.load_json(blob)
 
     def load_json(self, raw):
         self.logger.info("Loading JSON file")
         raw = json.loads(raw)
-        data = []
+        data_by_name = {}
+        data_by_nid = {}
         for session in raw:
+            # handle leading/trailing spaces in names
+            name = session["Name"].strip()
+            session["Name"] = name
             track = session[self.FIELD_MAPPING["tracks"]].strip()
             room = session[self.FIELD_MAPPING["rooms"]].strip()
             if track != "":
@@ -81,8 +85,9 @@ class OurJSON:
             if room != "":
                 self.rooms.add(room)
             clean_session = {k: v.strip() for k, v in session.items()}
-            data.append(clean_session)
-        return data
+            data_by_name[name] = clean_session
+            data_by_nid[session["nid"]] = clean_session
+        return (data_by_name, data_by_nid)
 
 
 class GuideBook:
@@ -106,12 +111,15 @@ class GuideBook:
         "Developer": "#d65c09",
         "DevOpsDay LA": "#565448",
         "Embedded Linux": "#004a4a",
+        "Entertainment": "#ff6f91",
+        "Fedora Hatch Day": "#294172",
         "FOSS @ HOME": "#998876",
         "General": "#97a67a",
         "HAM Radio": "#96beef",
         "Higher Education": "#fff8dc",  # Open Source in Higher Education
         "Kernel & Low Level Systems": "#ffa200",
         "Keynote": "#d31111",
+        "Kwaai Summit": "#4b2e83",
         "MySQL": "#0aaca0",
         "Next Generation": "#96f74b",  # The Next Generation
         "Observability": "#ffbc00",
@@ -155,14 +163,18 @@ class GuideBook:
 
     REGIONED_MAP = "Pasadena-Convention-Center-Map-1000-72-fs8"
 
-    def __init__(self, logger, update, key, x_key=None):
+    def __init__(self, logger, update, dryrun, key, x_key=None):
         self.logger = logger
         self.update = update
+        self.dryrun = dryrun
         self.headers = {"Authorization": "JWT " + key}
         self.guide = self.get_guide()
         self.tracks = self.get_things("tracks")
         self.rooms = self.get_things("rooms")
         self.sessions = self.get_things("sessions")
+        self.sessions_by_nid = {
+            session["import_id"]: session for session in self.sessions.values()
+        }
         self.x_rooms = []
 
         if x_key:
@@ -253,6 +265,12 @@ class GuideBook:
         self.logger.info("%s %s '%s' to Guidebook" % (verb, thing, name))
         self.logger.debug("Data: %s" % data)
         headers = self.headers if not thing.startswith("x-") else self.x_headers
+        if self.dryrun:
+            self.logger.info(
+                "[DRYRUN] Would have %s %s '%s' to Guidebook"
+                % (verb, thing, name)
+            )
+            return
         if update:
             response = requests.patch(
                 self.URLS[thing] + "%d/" % tid, data=data, headers=headers
@@ -414,7 +432,7 @@ class GuideBook:
         ourlist = getattr(self, thing)
         self.logger.debug("List of %s's is %s" % (thing, ourlist.keys()))
         ourid = None
-        if session[key] in ourlist:
+        if session[key] in ourlist and ourlist[session[key]] is not None:
             ourid = ourlist[session[key]]["id"]
         else:
             ourlist = getattr(self, "x_%s" % thing)
@@ -438,26 +456,50 @@ class GuideBook:
             "schedule_tracks": self.get_id("tracks", session),
             "locations": self.get_id("rooms", session),
             "add_to_schedule": True,
+            "import_id": session["nid"],
         }
         self.logger.debug("Data: %s" % data)
         self.sessions[name] = self.add_thing(
             "sessions", name, data, update, sid
         )
 
-    def setup_sessions(self, sessions):
+    def setup_sessions(self, sessions_by_name, sessions_by_nid):
         """
         Add all rooms passed in if missing.
         """
-        for session in sessions:
+        # first walk all already existing sessions, if they don't have
+        # an NID, add one
+        for name, info in self.sessions.items():
+            if info["import_id"] is None:
+                if name in sessions_by_name.keys():
+                    self.logger.info(
+                        "Adding NID %s to session '%s'",
+                        info["import_id"],
+                        name,
+                    )
+                    session = sessions_by_name[name]
+                    update = True
+                    sid = self.sessions[name]["id"]
+                    self.add_session(session, update, sid, True)
+                else:
+                    self.logger.warning(
+                        "Session '%s' exists in Guidebook but not in our data. "
+                        "It will be left alone, but you may want to delete it.",
+                        name,
+                    )
+
+        # now loop through pass in sessions, and add/update as needed
+        for nid, session in sessions_by_nid.items():
             name = session["Name"]
             update = False
             sid = None
             if session["StartTime"] == "":
                 self.logger.warning("Skipping %s - no date" % name)
                 continue
-            if name in self.sessions:
+            nid = session["nid"]
+            if nid in self.sessions_by_nid:
                 update = True
-                sid = self.sessions[name]["id"]
+                sid = self.sessions_by_nid[nid]["id"]
             self.add_session(session, update, sid)
 
     def delete_sessions(self):
@@ -579,7 +621,13 @@ def get_tokens(logger):
     default=DBASE_DEFAULT,
     help="JSON file or http(s) URL to JSON data.",
 )
-def main(debug, update, delete_all, feed):
+@click.option(
+    "--dryrun/--no-dryrun",
+    "-n",
+    default=False,
+    help="Don't actually make any changes to Guidebook.",
+)
+def main(debug, update, delete_all, feed, dryrun):
     """
     Sync the schedule data from our website to Guidebook.
 
@@ -605,7 +653,7 @@ def main(debug, update, delete_all, feed):
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    (key, x_key) = get_tokens(logger)
+    key, x_key = get_tokens(logger)
 
     if delete_all:
         print("WARNING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")  # noqa: E999
@@ -615,13 +663,15 @@ def main(debug, update, delete_all, feed):
     else:
         ourdata = OurJSON(feed, logger)
 
-    ourguide = GuideBook(logger, update, key, x_key=x_key)
+    ourguide = GuideBook(logger, update, dryrun, key, x_key=x_key)
     if delete_all:
         ourguide.delete_all()
     else:
         ourguide.setup_tracks(ourdata.tracks)
         ourguide.setup_rooms(ourdata.rooms)
-        ourguide.setup_sessions(ourdata.sessions)
+        ourguide.setup_sessions(
+            ourdata.sessions_by_name, ourdata.sessions_by_nid
+        )
         if x_key:
             ourguide.setup_x_map_regions()
             # unclear exactly when this is needed.

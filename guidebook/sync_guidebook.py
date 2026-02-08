@@ -764,8 +764,8 @@ def get_tokens(logger):
 @click.option(
     "--update/--no-update",
     "-u",
-    default=False,
-    help="Update existing sessions.",
+    default=True,
+    help="Update existing sessions. Does so idempotently, defaults to True.",
 )
 @click.option(
     "--delete-all/--no-delete-all",

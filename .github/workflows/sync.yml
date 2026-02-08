@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: '1,31 * * * *' # twice an hour
   workflow_dispatch:
-    inputs:
-      update:
-        description: 'Run sync with --update to force all sessions to be updated'
-        type: boolean
-        required: false
-        default: false
 
 jobs:
   sync:
@@ -33,11 +27,7 @@ jobs:
           GUIDEBOOK_API_TOKEN: ${{ secrets.GUIDEBOOK_API_TOKEN }}
           GUIDEBOOK_JWT_TOKEN: ${{ secrets.GUIDEBOOK_JWT_TOKEN }}
         run: |
-          CMD="python ./guidebook/sync_guidebook.py --max-deletes 5 -u"
-
-          if [[ "${{ github.event.inputs.update }}" == "true" ]]; then
-            CMD="$CMD --update"
-          fi
+          CMD="python ./guidebook/sync_guidebook.py --max-deletes 5"
 
           echo "Running: $CMD"
           $CMD

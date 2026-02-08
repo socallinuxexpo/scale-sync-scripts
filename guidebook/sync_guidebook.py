@@ -31,6 +31,7 @@
 #
 
 from datetime import datetime
+from dateutil import parser
 import click
 import json
 import logging
@@ -172,9 +173,9 @@ class GuideBook:
         self.guide = self.get_guide()
         self.tracks = self.get_things("tracks")
         self.rooms = self.get_things("rooms")
-        self.sessions = self.get_things("sessions")
-        self.sessions_by_nid = {
-            session["import_id"]: session for session in self.sessions.values()
+        self.sessions_by_nid = self.get_things("sessions", "import_id")
+        self.sessions_by_name = {
+            s["name"]: s for s in self.sessions_by_nid.values()
         }
         self.x_rooms = []
         self.nids_to_delete = []
@@ -223,7 +224,7 @@ class GuideBook:
         )
         sys.exit(1)
 
-    def get_things(self, thing):
+    def get_things(self, thing, key="name"):
         """
         Get the current set of <thing> from Guidebook, where <thing> is rooms,
         tracks, sessions.
@@ -245,7 +246,7 @@ class GuideBook:
             self.logger.debug("Response: %s" % response)
             for ourthing in response["results"]:
                 # Fallback to id for things without names (e.g. map-regions)
-                name = ourthing.get("name") or ourthing.get("id")
+                name = ourthing.get(key) or ourthing.get("id")
                 if isinstance(name, dict):
                     # Things retrived from the internal API
                     # (i.e. x-* things) have names that are dicts like:
@@ -313,6 +314,17 @@ class GuideBook:
             update = False
             tid = None
             if track in self.tracks:
+                orig = self.tracks[track]
+                # the only "info" about a track is the color (the name is
+                # our primary key), so if the color is correct, it's up to date.
+                if orig["color"].upper() == self.COLOR_MAP[track].upper():
+                    self.logger.debug(
+                        "Track '%s' exists in Guidebook and has correct color"
+                        " %s. No update needed.",
+                        track,
+                        self.COLOR_MAP[track].upper(),
+                    )
+                    continue
                 update = True
                 tid = self.tracks[track]["id"]
             self.add_track(track, update, tid)
@@ -340,6 +352,16 @@ class GuideBook:
             if room in self.x_rooms:
                 continue
             if room in self.rooms:
+                orig = self.rooms[room]
+                # Rooms can't really change, but just in case, we'll
+                # check it's location type is correct.
+                if orig["location_type"] == 2:
+                    self.logger.debug(
+                        "Room '%s' exists in Guidebook and has correct"
+                        " location_type. No update needed.",
+                        room,
+                    )
+                    continue
                 update = True
                 rid = self.rooms[room]["id"]
             self.add_room(room, update, rid)
@@ -410,7 +432,7 @@ class GuideBook:
             pt_dt = pytz.timezone("America/Los_Angeles").localize(loc_dt)
         else:
             pt_dt = loc_dt
-        return pt_dt.astimezone(pytz.utc)
+        return pt_dt.astimezone(pytz.utc).isoformat(timespec="seconds")
 
     def get_times(self, session):
         """
@@ -443,11 +465,11 @@ class GuideBook:
             ourid = ourlist[session[key]]["id"]
         return [ourid]
 
-    def add_session(self, session, update, sid=None):
+    def add_session(self, session, original_session=None):
         """
         Sesssion-specific wrapper around add_thing()
         """
-        if update and not self.update:
+        if original_session is not None and not self.update:
             return
         name = session["Name"]
         start, end = self.get_times(session)
@@ -462,18 +484,63 @@ class GuideBook:
             "add_to_schedule": True,
             "import_id": session["nid"],
         }
-        self.logger.debug("Data: %s" % data)
-        self.sessions[name] = self.add_thing(
-            "sessions", name, data, update, sid
-        )
+        update = False
+        sid = None
+        if original_session is not None:
+            if not self.session_needs_update(data, original_session):
+                self.logger.debug("Session '%s' does not need update" % name)
+                return
+            update = True
+            sid = original_session["id"]
 
-    def setup_sessions(self, sessions_by_name, sessions_by_nid):
+        self.logger.debug("Data: %s" % data)
+        s = self.add_thing("sessions", name, data, update, sid)
+        self.sessions_by_nid[session["nid"]] = s
+        self.sessions_by_name[name] = s
+
+    def session_needs_update(self, new_data, original_session):
         """
-        Add all rooms passed in if missing.
+        Compare the new session data to the original session data, and return
+        True if we need to update. This is needed because some fields (e.g.
+        description) are not updated if they haven't changed, and we want to
+        avoid unnecessary updates.
         """
-        # first walk all already existing sessions, if they don't have
-        # an NID, add one
-        for name, info in self.sessions.items():
+        all_keys = [
+            "name",
+            "start_time",
+            "end_time",
+            "description_html",
+            "schedule_tracks",
+            "locations",
+        ]
+        for key in all_keys:
+            if "time" in key:
+                a = parser.isoparse(new_data[key])
+                b = parser.isoparse(original_session[key])
+                a = a.astimezone(pytz.utc)
+                b = b.astimezone(pytz.utc)
+            else:
+                a = new_data[key]
+                b = original_session[key]
+            if a != b:
+                self.logger.info(
+                    "Session '%s' needs update because '%s' changed: '%s' !="
+                    " '%s'",
+                    new_data["name"],
+                    key,
+                    new_data[key],
+                    original_session[key],
+                )
+                return True
+
+        return False
+
+    def backfill_session_nids(self, sessions_by_name, sessions_by_nid):
+        """
+        We didn't always have a unique identifier, and this will backfill
+        missing ones. Probably can be nuked by 24X.
+        """
+        for name, info in self.sessions_by_name.items():
             if info["import_id"] is None:
                 if name in sessions_by_name.keys():
                     self.logger.info(
@@ -483,7 +550,7 @@ class GuideBook:
                     )
                     session = sessions_by_name[name]
                     update = True
-                    sid = self.sessions[name]["id"]
+                    sid = info["id"]
                     self.add_session(session, update, sid, True)
                 else:
                     self.logger.warning(
@@ -502,6 +569,14 @@ class GuideBook:
                     )
                     self.nids_to_delete.append(nid)
 
+    def setup_sessions(self, sessions_by_name, sessions_by_nid):
+        """
+        Add all rooms passed in if missing.
+        """
+
+        # First, make sure we have NIDs for all sessions in Guidebook
+        self.backfill_session_nids(sessions_by_name, sessions_by_nid)
+
         # now loop through pass in sessions, and add/update as needed
         for nid, session in sessions_by_nid.items():
             name = session["Name"]
@@ -512,9 +587,8 @@ class GuideBook:
                 continue
             nid = session["nid"]
             if nid in self.sessions_by_nid:
-                update = True
-                sid = self.sessions_by_nid[nid]["id"]
-            self.add_session(session, update, sid)
+                original_session = self.sessions_by_nid[nid]
+            self.add_session(session, original_session)
 
         # Clean up sessions that should be deleted
         num_deletes = len(self.nids_to_delete)
@@ -538,6 +612,10 @@ class GuideBook:
                 self.delete_session(session)
 
     def delete_session(self, session):
+        """
+        Delete a session. Unlike "add" functions, this takes the object
+        from the Guidebook API, not our data.
+        """
         if self.dryrun:
             self.logger.info(
                 "[DRYRUN] Would have deleted session '%s' from Guidebook"
@@ -560,10 +638,14 @@ class GuideBook:
 
     def delete_sessions(self):
         self.logger.warning("Deleting all sessions")
-        for session in self.sessions.values():
+        for session in self.sessions_by_nid.values():
             self.delete_session(session)
 
     def delete_track(self, track):
+        """
+        Delete a track. Unlike "add" functions, this takes the object
+        from the Guidebook API, not our data.
+        """
         if self.dryrun:
             self.logger.info(
                 "[DRYRUN] Would have deleted track '%s' from Guidebook"
@@ -589,6 +671,10 @@ class GuideBook:
             self.delete_track(track)
 
     def delete_room(self, room):
+        """
+        Delete a room. Unlike "add" functions, this takes the object
+        from the Guidebook API, not our data.
+        """
         if self.dryrun:
             self.logger.info(
                 "[DRYRUN] Would have deleted room '%s' from Guidebook"
@@ -617,6 +703,11 @@ class GuideBook:
         self.delete_rooms()
 
     def publish_updates(self):
+        """
+        Publish pending updates. This is an internal/unpublished API, and
+        this may not be identical to the "publish" button in the Guidebook
+        builder. However, it does publish all pending session data at a minimum.
+        """
         if self.dryrun:
             self.logger.info("[DRYRUN] Would have published pending updates.")
             return

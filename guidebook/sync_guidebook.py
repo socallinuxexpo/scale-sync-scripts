@@ -163,10 +163,11 @@ class GuideBook:
 
     REGIONED_MAP = "Pasadena-Convention-Center-Map-1000-72-fs8"
 
-    def __init__(self, logger, update, dryrun, key, x_key=None):
+    def __init__(self, logger, update, dryrun, max_deletes, key, x_key=None):
         self.logger = logger
         self.update = update
         self.dryrun = dryrun
+        self.max_deletes = max_deletes
         self.headers = {"Authorization": "JWT " + key}
         self.guide = self.get_guide()
         self.tracks = self.get_things("tracks")
@@ -176,6 +177,7 @@ class GuideBook:
             session["import_id"]: session for session in self.sessions.values()
         }
         self.x_rooms = []
+        self.nids_to_delete = []
 
         if x_key:
             self.x_headers = {"Authorization": "JWT " + x_key}
@@ -262,15 +264,17 @@ class GuideBook:
         functions that know how to build the data and use it.
         """
         verb = "Updating" if update else "Adding"
-        self.logger.info("%s %s '%s' to Guidebook" % (verb, thing, name))
-        self.logger.debug("Data: %s" % data)
-        headers = self.headers if not thing.startswith("x-") else self.x_headers
         if self.dryrun:
             self.logger.info(
-                "[DRYRUN] Would have %s %s '%s' to Guidebook"
+                "[DRYRUN] Would have: %s %s '%s' to Guidebook"
                 % (verb, thing, name)
             )
             return
+
+        self.logger.info("%s %s '%s' to Guidebook" % (verb, thing, name))
+        self.logger.debug("Data: %s" % data)
+        headers = self.headers if not thing.startswith("x-") else self.x_headers
+
         if update:
             response = requests.patch(
                 self.URLS[thing] + "%d/" % tid, data=data, headers=headers
@@ -483,10 +487,20 @@ class GuideBook:
                     self.add_session(session, update, sid, True)
                 else:
                     self.logger.warning(
-                        "Session '%s' exists in Guidebook but not in our data. "
-                        "It will be left alone, but you may want to delete it.",
-                        name,
+                        "Session '%s' exists in Guidebook, but has no NID,"
+                        " and we cannot find the name in our data. Deleting it."
+                        % name,
                     )
+                    self.delete_session(info)
+            else:
+                nid = info["import_id"]
+                if nid not in sessions_by_nid.keys():
+                    self.logger.warning(
+                        "Session '%s' with NID %s exists in Guidebook, but we"
+                        " cannot find it in our data. Adding it to the delete"
+                        " list." % (name, nid)
+                    )
+                    self.nids_to_delete.append(nid)
 
         # now loop through pass in sessions, and add/update as needed
         for nid, session in sessions_by_nid.items():
@@ -502,51 +516,100 @@ class GuideBook:
                 sid = self.sessions_by_nid[nid]["id"]
             self.add_session(session, update, sid)
 
+        # Clean up sessions that should be deleted
+        num_deletes = len(self.nids_to_delete)
+        if num_deletes == 0:
+            return
+
+        if num_deletes > self.max_deletes:
+            self.logger.warning(
+                "Number of sessions to delete (%d) exceeds the max threshold"
+                " (%d). Not deleting any sessions.",
+                num_deletes,
+                self.max_deletes,
+            )
+        else:
+            self.logger.warning(
+                "Deleting %d sessions that are no longer in our data",
+                num_deletes,
+            )
+            for nid in self.nids_to_delete:
+                session = self.sessions_by_nid[nid]
+                self.delete_session(session)
+
+    def delete_session(self, session):
+        if self.dryrun:
+            self.logger.info(
+                "[DRYRUN] Would have deleted session '%s' from Guidebook"
+                % session["name"]
+            )
+            return
+
+        self.logger.debug(
+            "Deleting session %d [%s]" % (session["id"], session["name"])
+        )
+        response = requests.delete(
+            self.URLS["sessions"] + "%d/" % session["id"],
+            headers=self.headers,
+        )
+        self.logger.debug("Got %d" % response.status_code)
+        if not (response.status_code >= 200 and response.status_code < 300):
+            self.logger.error("Failed to delete")
+            self.logger.error("RESPONSE: %s" % response.json())
+            sys.exit(1)
+
     def delete_sessions(self):
         self.logger.warning("Deleting all sessions")
         for session in self.sessions.values():
-            self.logger.debug(
-                "Deleting session %d [%s]" % (session["id"], session["name"])
+            self.delete_session(session)
+
+    def delete_track(self, track):
+        if self.dryrun:
+            self.logger.info(
+                "[DRYRUN] Would have deleted track '%s' from Guidebook"
+                % track["name"]
             )
-            response = requests.delete(
-                self.URLS["sessions"] + "%d/" % session["id"],
-                headers=self.headers,
-            )
-            self.logger.debug("Got %d" % response.status_code)
-            if not (response.status_code >= 200 and response.status_code < 300):
-                self.logger.error("Failed to delete")
-                self.logger.error("RESPONSE: %s" % response.json())
-                sys.exit(1)
+            return
+
+        self.logger.debug(
+            "Deleting track %d [%s]" % (track["id"], track["name"])
+        )
+        response = requests.delete(
+            self.URLS["tracks"] + "%d/" % track["id"],
+            headers=self.headers,
+        )
+        if response.status_code != 204:
+            self.logger.error("Failed to delete")
+            self.logger.error("RESPONSE: %s" % response.json())
+            sys.exit(1)
 
     def delete_tracks(self):
         self.logger.warning("Deleting all tracks")
         for track in self.tracks.values():
-            self.logger.debug(
-                "Deleting track %d [%s]" % (track["id"], track["name"])
+            self.delete_track(track)
+
+    def delete_room(self, room):
+        if self.dryrun:
+            self.logger.info(
+                "[DRYRUN] Would have deleted room '%s' from Guidebook"
+                % room["name"]
             )
-            response = requests.delete(
-                self.URLS["tracks"] + "%d/" % track["id"],
-                headers=self.headers,
-            )
-            if response.status_code != 204:
-                self.logger.error("Failed to delete")
-                self.logger.error("RESPONSE: %s" % response.json())
-                sys.exit(1)
+            return
+
+        self.logger.debug("Deleting room %d [%s]" % (room["id"], room["name"]))
+        response = requests.delete(
+            self.URLS["rooms"] + "%d/" % room["id"],
+            headers=self.headers,
+        )
+        if response.status_code != 204:
+            self.logger.error("Failed to delete")
+            self.logger.error("RESPONSE: %s" % response.json())
+            sys.exit(1)
 
     def delete_rooms(self):
         self.logger.warning("Deleting all rooms")
         for room in self.rooms.values():
-            self.logger.debug(
-                "Deleting room %d [%s]" % (room["id"], room["name"])
-            )
-            response = requests.delete(
-                self.URLS["rooms"] + "%d/" % room["id"],
-                headers=self.headers,
-            )
-            if response.status_code != 204:
-                self.logger.error("Failed to delete")
-                self.logger.error("RESPONSE: %s" % response.json())
-                sys.exit(1)
+            self.delete_room(room)
 
     def delete_all(self):
         self.delete_sessions()
@@ -554,6 +617,10 @@ class GuideBook:
         self.delete_rooms()
 
     def publish_updates(self):
+        if self.dryrun:
+            self.logger.info("[DRYRUN] Would have published pending updates.")
+            return
+
         self.logger.info("Publishing changes")
         response = requests.post(
             self.URLS["publish"].format(guide=self.guide),
@@ -627,7 +694,13 @@ def get_tokens(logger):
     default=False,
     help="Don't actually make any changes to Guidebook.",
 )
-def main(debug, update, delete_all, feed, dryrun):
+@click.option(
+    "--max-deletes",
+    default=0,
+    help="Max number of sessions to delete when syncing. Zero will not"
+    " delete any sessions. Ignored if --delete-all is used.",
+)
+def main(debug, update, delete_all, feed, dryrun, max_deletes):
     """
     Sync the schedule data from our website to Guidebook.
 
@@ -663,7 +736,7 @@ def main(debug, update, delete_all, feed, dryrun):
     else:
         ourdata = OurJSON(feed, logger)
 
-    ourguide = GuideBook(logger, update, dryrun, key, x_key=x_key)
+    ourguide = GuideBook(logger, update, dryrun, max_deletes, key, x_key=x_key)
     if delete_all:
         ourguide.delete_all()
     else:

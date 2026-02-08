@@ -33,7 +33,7 @@ jobs:
           GUIDEBOOK_API_TOKEN: ${{ secrets.GUIDEBOOK_API_TOKEN }}
           GUIDEBOOK_JWT_TOKEN: ${{ secrets.GUIDEBOOK_JWT_TOKEN }}
         run: |
-          CMD="python ./guidebook/sync_guidebook.py"
+          CMD="python ./guidebook/sync_guidebook.py --max-deletes 5"
 
           if [[ "${{ github.event.inputs.update }}" == "true" ]]; then
             CMD="$CMD --update"

@@ -177,6 +177,8 @@ class GuideBook:
         self.sessions_by_name = {
             s["name"]: s for s in self.sessions_by_nid.values()
         }
+        for nid, session in self.sessions_by_nid.items():
+            assert nid == session["import_id"]
         self.x_rooms = []
         self.nids_to_delete = []
 
@@ -515,8 +517,10 @@ class GuideBook:
         ]
         for key in all_keys:
             if "time" in key:
-                a = parser.isoparse(new_data[key])
-                b = parser.isoparse(original_session[key])
+                a = new_data[key].replace("+0000", "+00:00")
+                b = original_session[key].replace("+0000", "+00:00")
+                a = parser.isoparse(a)
+                b = parser.isoparse(b)
                 a = a.astimezone(pytz.utc)
                 b = b.astimezone(pytz.utc)
             else:
@@ -579,13 +583,11 @@ class GuideBook:
 
         # now loop through pass in sessions, and add/update as needed
         for nid, session in sessions_by_nid.items():
+            original_session = None
             name = session["Name"]
-            update = False
-            sid = None
             if session["StartTime"] == "":
                 self.logger.warning("Skipping %s - no date" % name)
                 continue
-            nid = session["nid"]
             if nid in self.sessions_by_nid:
                 original_session = self.sessions_by_nid[nid]
             self.add_session(session, original_session)

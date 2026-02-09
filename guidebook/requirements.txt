@@ -3,3 +3,4 @@ requests
 pytz
 xdg-base-dirs
 dateutils
+markdownify

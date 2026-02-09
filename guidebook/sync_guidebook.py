@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 #
 # Copyright 2018-present Southern California Linux Expo
@@ -32,6 +32,7 @@
 
 from datetime import datetime
 from dateutil import parser
+from markdownify import markdownify as md
 import click
 import json
 import logging
@@ -500,6 +501,30 @@ class GuideBook:
         self.sessions_by_nid[session["nid"]] = s
         self.sessions_by_name[name] = s
 
+    def normalize_html(self, html):
+        """
+        The HTML supported by Drupal vs Guidebook is different and
+        GB normalizes it upon import, so we can get in a state where
+        we always detect a difference.
+
+        Stripping HTML is lossy, so instead we convert to MD and compare
+        that which gives us a lot of information about formatting without
+        being sensitive to exact HTML.
+        """
+        markdown = md(html)
+        # Normalize whitespace and quotes
+        markdown = markdown.replace("\u2018", "'").replace("\u2019", "'")
+        markdown = markdown.replace("\u201c", '"').replace("\u201d", '"')
+        # collapse whitespace
+        markdown = " ".join(markdown.split())
+        return markdown
+
+    def normalize_time(self, time_str):
+        n = time_str.replace("+0000", "+00:00")
+        n = parser.isoparse(n)
+        n = n.astimezone(pytz.utc)
+        return n
+
     def session_needs_update(self, new_data, original_session):
         """
         Compare the new session data to the original session data, and return
@@ -517,12 +542,11 @@ class GuideBook:
         ]
         for key in all_keys:
             if "time" in key:
-                a = new_data[key].replace("+0000", "+00:00")
-                b = original_session[key].replace("+0000", "+00:00")
-                a = parser.isoparse(a)
-                b = parser.isoparse(b)
-                a = a.astimezone(pytz.utc)
-                b = b.astimezone(pytz.utc)
+                a = self.normalize_time(new_data[key])
+                b = self.normalize_time(original_session[key])
+            elif "html" in key:
+                a = self.normalize_html(new_data[key])
+                b = self.normalize_html(original_session[key])
             else:
                 a = new_data[key]
                 b = original_session[key]

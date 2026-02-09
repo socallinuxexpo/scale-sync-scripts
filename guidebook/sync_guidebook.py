@@ -397,6 +397,41 @@ class GuideBook:
             None,
         )
 
+    def x_map_region_needs_update(
+        self, map_region, original_map_region, location_id
+    ):
+        """
+        Compare the new map region data to the original map region data, and
+        return True if we need to update.
+        """
+        if original_map_region["location"]["id"] != location_id:
+            self.logger.info(
+                "Map region needs update because location changed: %s != %s",
+                original_map_region["location"]["id"],
+                location_id,
+            )
+            return True
+
+        fields_to_check = [
+            ("relative_x", map_region["x"]),
+            ("relative_y", map_region["y"]),
+            ("relative_width", map_region["w"]),
+            ("relative_height", map_region["h"]),
+        ]
+
+        for field_name, new_value in fields_to_check:
+            original_value = original_map_region[field_name]
+            if new_value != original_value:
+                self.logger.info(
+                    "Map region needs update because '%s' changed: %s != %s",
+                    field_name,
+                    new_value,
+                    original_value,
+                )
+                return True
+
+        return False
+
     def setup_x_map_regions(self):
         for room, map_region in self.ROOM_TO_MAP_REGION.items():
             if room not in self.x_rooms:
@@ -412,6 +447,16 @@ class GuideBook:
             location_id = self.x_rooms[room]["id"]
             guidebook_map_region = self.get_x_map_region_for_room(location_id)
             if guidebook_map_region:
+                # Check if the map region actually needs updating
+                if not self.x_map_region_needs_update(
+                    map_region, guidebook_map_region, location_id
+                ):
+                    self.logger.debug(
+                        "Map region for room '%s' exists in Guidebook and has "
+                        "correct coordinates. No update needed.",
+                        room,
+                    )
+                    continue
                 update = True
                 rid = guidebook_map_region["id"]
 

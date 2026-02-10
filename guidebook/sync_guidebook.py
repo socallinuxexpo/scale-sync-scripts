@@ -33,6 +33,13 @@
 from datetime import datetime
 from dateutil import parser
 from markdownify import markdownify as md
+from datadog_api_client import ApiClient, Configuration
+from datadog_api_client.v2.api.metrics_api import MetricsApi
+from datadog_api_client.v2.model.metric_intake_type import MetricIntakeType
+from datadog_api_client.v2.model.metric_payload import MetricPayload
+from datadog_api_client.v2.model.metric_point import MetricPoint
+from datadog_api_client.v2.model.metric_resource import MetricResource
+from datadog_api_client.v2.model.metric_series import MetricSeries
 import click
 import json
 import logging
@@ -41,6 +48,7 @@ import pytz
 import re
 import requests
 import sys
+import time
 
 try:
     import xdg_base_dirs as xdg
@@ -49,6 +57,98 @@ except ImportError:
 
 DBASE_DEFAULT = "https://www.socallinuxexpo.org/scale/23x/app"
 GUIDE_NAME = "SCaLE 23x"
+
+
+class StatsTracker:
+    """Track statistics for additions, updates, and deletions of items."""
+
+    def __init__(self):
+        self.stats = {
+            "tracks": {"added": 0, "updated": 0, "deleted": 0},
+            "rooms": {"added": 0, "updated": 0, "deleted": 0},
+            "sessions": {"added": 0, "updated": 0, "deleted": 0},
+            "map_regions": {"added": 0, "updated": 0, "deleted": 0},
+        }
+
+    def increment(self, item_type, operation):
+        """Increment counter for a given item type and operation."""
+        if item_type in self.stats and operation in self.stats[item_type]:
+            self.stats[item_type][operation] += 1
+
+    def get_stats(self):
+        """Return the current statistics."""
+        return self.stats
+
+    def log_stats(self, logger):
+        """Log statistics summary."""
+        logger.info("=" * 60)
+        logger.info("SYNC STATISTICS SUMMARY")
+        logger.info("=" * 60)
+        for item_type, operations in self.stats.items():
+            total = sum(operations.values())
+            if total > 0:
+                logger.info(
+                    f"{item_type.upper()}: "
+                    f"Added={operations['added']}, "
+                    f"Updated={operations['updated']}, "
+                    f"Deleted={operations['deleted']}"
+                )
+        logger.info("=" * 60)
+
+    def send_to_datadog(self, logger, dryrun=False):
+        """Send metrics to Datadog."""
+        if dryrun:
+            logger.info("[DRYRUN] Would have sent metrics to Datadog")
+            return
+
+        dd_api_key = os.getenv("DD_API_KEY")
+        dd_site = os.getenv("DD_SITE", "datadoghq.com")
+
+        if not dd_api_key:
+            logger.warning(
+                "DD_API_KEY not set. Skipping Datadog metrics submission."
+            )
+            return
+
+        try:
+            configuration = Configuration()
+            configuration.api_key["apiKeyAuth"] = dd_api_key
+            configuration.server_variables["site"] = dd_site
+
+            timestamp = int(time.time())
+            series = []
+
+            for item_type, operations in self.stats.items():
+                for operation, count in operations.items():
+                    metric_name = f"guidebook.sync.{item_type}.{operation}"
+                    series.append(
+                        MetricSeries(
+                            metric=metric_name,
+                            type=MetricIntakeType.COUNT,
+                            points=[
+                                MetricPoint(
+                                    timestamp=timestamp,
+                                    value=float(count),
+                                )
+                            ],
+                            tags=[f"guide:{GUIDE_NAME}"],
+                        )
+                    )
+
+            if series:
+                with ApiClient(configuration) as api_client:
+                    api_instance = MetricsApi(api_client)
+                    body = MetricPayload(
+                        series=series,
+                    )
+                    response = api_instance.submit_metrics(body=body)
+                    logger.info("Successfully sent metrics to Datadog")
+                    logger.debug(f"Datadog response: {response}")
+            else:
+                logger.debug("No metrics to send to Datadog")
+
+        except Exception as e:
+            logger.error(f"Failed to send metrics to Datadog: {e}")
 
 
 class OurJSON:
@@ -165,11 +265,21 @@ class GuideBook:
 
     REGIONED_MAP = "Pasadena-Convention-Center-Map-1000-72-fs8"
 
-    def __init__(self, logger, update, dryrun, max_deletes, key, x_key=None):
+    def __init__(
+        self,
+        logger,
+        update,
+        dryrun,
+        max_deletes,
+        key,
+        stats_tracker,
+        x_key=None,
+    ):
         self.logger = logger
         self.update = update
         self.dryrun = dryrun
         self.max_deletes = max_deletes
+        self.stats = stats_tracker
         self.headers = {"Authorization": "JWT " + key}
         self.guide = self.get_guide()
         self.tracks = self.get_things("tracks")
@@ -308,6 +418,8 @@ class GuideBook:
             "color": self.COLOR_MAP[track].upper(),
         }
         self.tracks[track] = self.add_thing("tracks", track, data, update, tid)
+        operation = "updated" if update else "added"
+        self.stats.increment("tracks", operation)
 
     def setup_tracks(self, tracks):
         """
@@ -344,6 +456,8 @@ class GuideBook:
             "location_type": 2,  # not google maps
         }
         self.rooms[room] = self.add_thing("rooms", room, data, update, rid)
+        operation = "updated" if update else "added"
+        self.stats.increment("rooms", operation)
 
     def setup_rooms(self, rooms):
         """
@@ -382,6 +496,8 @@ class GuideBook:
             "relative_height": map_region["h"],
         }
         self.add_thing("x-map-regions", name, data, update, rid)
+        operation = "updated" if update else "added"
+        self.stats.increment("map_regions", operation)
 
     def get_x_map_region_for_room(self, location_id):
         return next(
@@ -545,6 +661,8 @@ class GuideBook:
         s = self.add_thing("sessions", name, data, update, sid)
         self.sessions_by_nid[session["nid"]] = s
         self.sessions_by_name[name] = s
+        operation = "updated" if update else "added"
+        self.stats.increment("sessions", operation)
 
     def normalize_html(self, html):
         """
@@ -706,6 +824,7 @@ class GuideBook:
             self.logger.error("Failed to delete")
             self.logger.error("RESPONSE: %s" % response.json())
             sys.exit(1)
+        self.stats.increment("sessions", "deleted")
 
     def delete_sessions(self):
         self.logger.warning("Deleting all sessions")
@@ -735,6 +854,7 @@ class GuideBook:
             self.logger.error("Failed to delete")
             self.logger.error("RESPONSE: %s" % response.json())
             sys.exit(1)
+        self.stats.increment("tracks", "deleted")
 
     def delete_tracks(self):
         self.logger.warning("Deleting all tracks")
@@ -762,6 +882,7 @@ class GuideBook:
             self.logger.error("Failed to delete")
             self.logger.error("RESPONSE: %s" % response.json())
             sys.exit(1)
+        self.stats.increment("rooms", "deleted")
 
     def delete_rooms(self):
         self.logger.warning("Deleting all rooms")
@@ -889,6 +1010,7 @@ def main(debug, update, delete_all, feed, dryrun, max_deletes):
     logger.addHandler(ch)
 
     key, x_key = get_tokens(logger)
+    stats_tracker = StatsTracker()
 
     if delete_all:
         print("WARNING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")  # noqa: E999
@@ -898,7 +1020,9 @@ def main(debug, update, delete_all, feed, dryrun, max_deletes):
     else:
         ourdata = OurJSON(feed, logger)
 
-    ourguide = GuideBook(logger, update, dryrun, max_deletes, key, x_key=x_key)
+    ourguide = GuideBook(
+        logger, update, dryrun, max_deletes, key, stats_tracker, x_key=x_key
+    )
     if delete_all:
         ourguide.delete_all()
     else:
@@ -911,6 +1035,10 @@ def main(debug, update, delete_all, feed, dryrun, max_deletes):
             ourguide.setup_x_map_regions()
             # unclear exactly when this is needed.
             ourguide.publish_updates()
+
+    # Log and send statistics
+    stats_tracker.log_stats(logger)
+    stats_tracker.send_to_datadog(logger, dryrun=dryrun)
 
 
 if __name__ == "__main__":

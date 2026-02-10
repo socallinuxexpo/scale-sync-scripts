@@ -4,3 +4,4 @@ pytz
 xdg-base-dirs
 dateutils
 markdownify
+datadog-api-client

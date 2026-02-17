@@ -222,6 +222,7 @@ class GuideBook:
         "Kernel & Low Level Systems": "#ffa200",
         "Keynote": "#d31111",
         "Kwaai Summit": "#4b2e83",
+        "LibreGraphics": "#e10098",
         "MySQL": "#0aaca0",
         "Next Generation": "#96f74b",  # The Next Generation
         "Observability": "#ffbc00",

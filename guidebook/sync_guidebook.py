@@ -55,7 +55,8 @@ try:
 except ImportError:
     import xdg
 
-DBASE_DEFAULT = "https://www.socallinuxexpo.org/scale/23x/app"
+EVENTS_FEED = "https://www.socallinuxexpo.org/scale/23x/app"
+TRACKS_FEED = "https://www.socallinuxexpo.org/api/tracks/23x"
 GUIDE_NAME = "SCaLE 23x"
 
 
@@ -153,7 +154,7 @@ class StatsTracker:
 
 class OurJSON:
     rooms = set()
-    tracks = set()
+    tracks = {}
     sessions_by_name = {}
     sessions_by_nid = {}
 
@@ -162,17 +163,34 @@ class OurJSON:
         "rooms": "Location",
     }
 
-    def __init__(self, path, logger):
+    def __init__(self, event_feed, track_feed, logger):
         self.logger = logger
+
+        event_data = self._get_feed_data(event_feed)
+        track_data = self._get_feed_data(track_feed)
+
+        self.sessions_by_name, self.sessions_by_nid = self._load_event_json(
+            event_data
+        )
+        self.tracks = self._load_tracks_json(track_data)
+
+    def _get_feed_data(self, path):
+        self.logger.info("Loading JSON feed from %s" % path)
         if path.startswith("http://") or path.startswith("https://"):
             response = requests.get(path)
-            blob = response.text
-        else:
-            blob = open(path, "r").read()
-        self.sessions_by_name, self.sessions_by_nid = self.load_json(blob)
+            return response.text
+        return open(path, "r").read()
 
-    def load_json(self, raw):
-        self.logger.info("Loading JSON file")
+    def _load_tracks_json(self, raw):
+        raw = json.loads(raw)
+        tracks = {}
+        for track in raw:
+            # temporary until we fix the feed
+            name = track["name"].replace("&amp;", "&")
+            tracks[name] = track["color"]
+        return tracks
+
+    def _load_event_json(self, raw):
         raw = json.loads(raw)
         data_by_name = {}
         data_by_nid = {}
@@ -180,10 +198,7 @@ class OurJSON:
             # handle leading/trailing spaces in names
             name = session["Name"].strip()
             session["Name"] = name
-            track = session[self.FIELD_MAPPING["tracks"]].strip()
             room = session[self.FIELD_MAPPING["rooms"]].strip()
-            if track != "":
-                self.tracks.add(track)
             if room != "":
                 self.rooms.add(room)
             clean_session = {k: v.strip() for k, v in session.items()}
@@ -202,38 +217,6 @@ class GuideBook:
         "x-maps": "https://builder.guidebook.com/api/maps/",
         "x-map-regions": "https://builder.guidebook.com/api/map-regions/",
         "publish": "https://builder.guidebook.com/api/guides/{guide}/publish/",
-    }
-
-    COLOR_MAP = {
-        "Applied Science": "#dddddd",
-        "AstriCon": "#8b4789",
-        "BoFs": "#ffbc00",
-        "Career Day": "#dddddd",  # Open Source Career Day
-        "Cloud Native": "#638dce",  # Cloud Native Days
-        "Developer": "#d65c09",
-        "DevOpsDay LA": "#565448",
-        "Embedded Linux": "#004a4a",
-        "Entertainment": "#ff6f91",
-        "Fedora Hatch Day": "#294172",
-        "FOSS @ HOME": "#998876",
-        "General": "#97a67a",
-        "HAM Radio": "#96beef",
-        "Higher Education": "#fff8dc",  # Open Source in Higher Education
-        "Kernel & Low Level Systems": "#ffa200",
-        "Keynote": "#d31111",
-        "Kwaai Summit": "#4b2e83",
-        "LibreGraphics": "#e10098",
-        "MySQL": "#0aaca0",
-        "Next Generation": "#96f74b",  # The Next Generation
-        "Observability": "#ffbc00",
-        "Open Government": "#6c6c6c",
-        "Open Source AI": "#ffd672",
-        "PlanetNix": "#2d5d3f",
-        "PostgreSQL": "#0aaca0",
-        "Security": "#000000",
-        "SunSecCon": "#e63946",
-        "Systems & Infrastructure": "#c4c249",
-        "Workshops": "#774022",
     }
 
     ROOM_TO_MAP_REGION = {
@@ -406,7 +389,7 @@ class GuideBook:
             sys.exit(1)
         return response
 
-    def add_track(self, track, update, tid):
+    def add_track(self, track, color, update, tid):
         """
         Track-specific wrapper around add_thing()
         """
@@ -416,9 +399,11 @@ class GuideBook:
             "guide": self.guide,
             "name": track,
             # NOTE WELL: Guidebook cannot handle lower-case letters
-            "color": self.COLOR_MAP[track].upper(),
+            "color": color,
         }
-        self.tracks[track] = self.add_thing("tracks", track, data, update, tid)
+        newinfo = self.add_thing("tracks", track, data, update, tid)
+        if not self.dryrun:
+            self.tracks[track] = newinfo
         operation = "updated" if update else "added"
         self.stats.increment("tracks", operation)
 
@@ -426,24 +411,26 @@ class GuideBook:
         """
         Add all tracks passed in if missing.
         """
-        for track in tracks:
+        for track, color in tracks.items():
+            # Guidebook only deals in upper-case colors, so we must match
+            color = color.upper()
             update = False
             tid = None
             if track in self.tracks:
                 orig = self.tracks[track]
                 # the only "info" about a track is the color (the name is
                 # our primary key), so if the color is correct, it's up to date.
-                if orig["color"].upper() == self.COLOR_MAP[track].upper():
+                if orig["color"] == color:
                     self.logger.debug(
                         "Track '%s' exists in Guidebook and has correct color"
                         " %s. No update needed.",
                         track,
-                        self.COLOR_MAP[track].upper(),
+                        color,
                     )
                     continue
                 update = True
                 tid = self.tracks[track]["id"]
-            self.add_track(track, update, tid)
+            self.add_track(track, color, update, tid)
 
     def add_room(self, room, update, rid):
         """
@@ -966,11 +953,16 @@ def get_tokens(logger):
     help="Delete all tracks, rooms, and sessions",
 )
 @click.option(
-    "--json",
-    "feed",
+    "--event-feed",
     metavar="FILE_OR_URL",
-    default=DBASE_DEFAULT,
+    default=EVENTS_FEED,
     help="JSON file or http(s) URL to JSON data.",
+)
+@click.option(
+    "--track-feed",
+    metavar="FILE_OR_URL",
+    default=TRACKS_FEED,
+    help="JSON file or http(s) URL to track data.",
 )
 @click.option(
     "--dryrun/--no-dryrun",
@@ -984,7 +976,9 @@ def get_tokens(logger):
     help="Max number of sessions to delete when syncing. Zero will not"
     " delete any sessions. Ignored if --delete-all is used.",
 )
-def main(debug, update, delete_all, feed, dryrun, max_deletes):
+def main(
+    debug, update, delete_all, event_feed, track_feed, dryrun, max_deletes
+):
     """
     Sync the schedule data from our website to Guidebook.
 
@@ -1019,7 +1013,7 @@ def main(debug, update, delete_all, feed, dryrun, max_deletes):
         print("into a schedule to lose all of that work.")
         click.confirm("ARE YOU FUCKING SURE?!", abort=True)
     else:
-        ourdata = OurJSON(feed, logger)
+        ourdata = OurJSON(event_feed, track_feed, logger)
 
     ourguide = GuideBook(
         logger, update, dryrun, max_deletes, key, stats_tracker, x_key=x_key

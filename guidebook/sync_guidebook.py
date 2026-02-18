@@ -185,8 +185,7 @@ class OurJSON:
         raw = json.loads(raw)
         tracks = {}
         for track in raw:
-            # temporary until we fix the feed
-            name = track["name"].replace("&amp;", "&")
+            name = track["name"]
             tracks[name] = track["color"]
         return tracks
 
@@ -707,8 +706,8 @@ class GuideBook:
                     " '%s'",
                     new_data["name"],
                     key,
-                    new_data[key],
-                    original_session[key],
+                    a,
+                    b,
                 )
                 return True
 

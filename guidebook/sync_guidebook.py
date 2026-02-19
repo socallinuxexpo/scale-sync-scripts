@@ -30,9 +30,7 @@
 # to update that.
 #
 
-from datetime import datetime
-from dateutil import parser
-from markdownify import markdownify as md
+from bs4 import BeautifulSoup
 from datadog_api_client import ApiClient, Configuration
 from datadog_api_client.v2.api.metrics_api import MetricsApi
 from datadog_api_client.v2.model.metric_intake_type import MetricIntakeType
@@ -40,6 +38,9 @@ from datadog_api_client.v2.model.metric_payload import MetricPayload
 from datadog_api_client.v2.model.metric_point import MetricPoint
 from datadog_api_client.v2.model.metric_resource import MetricResource
 from datadog_api_client.v2.model.metric_series import MetricSeries
+from datetime import datetime
+from dateutil import parser
+from markdownify import markdownify as md
 import click
 import json
 import logging
@@ -201,6 +202,16 @@ class OurJSON:
             if room != "":
                 self.rooms.add(room)
             clean_session = {k: v.strip() for k, v in session.items()}
+            if clean_session["LongAbstract"] != "":
+                html = BeautifulSoup(
+                    clean_session["LongAbstract"], "html.parser"
+                )
+                # nuke all images from the HTML because Guidebook doesn't
+                # support them and will escape the tags in a way that makes
+                # us forever update the sessions as different
+                for img in html.find_all("img"):
+                    img.decompose()
+                clean_session["LongAbstract"] = str(html)
             data_by_name[name] = clean_session
             data_by_nid[session["nid"]] = clean_session
         return (data_by_name, data_by_nid)
@@ -661,6 +672,7 @@ class GuideBook:
         that which gives us a lot of information about formatting without
         being sensitive to exact HTML.
         """
+
         markdown = md(html)
         # Normalize whitespace and quotes
         markdown = markdown.replace("\u2018", "'").replace("\u2019", "'")
@@ -692,14 +704,14 @@ class GuideBook:
         ]
         for key in all_keys:
             if "time" in key:
-                a = self.normalize_time(new_data[key])
-                b = self.normalize_time(original_session[key])
+                a = self.normalize_time(original_session[key])
+                b = self.normalize_time(new_data[key])
             elif "html" in key:
-                a = self.normalize_html(new_data[key])
-                b = self.normalize_html(original_session[key])
+                a = self.normalize_html(original_session[key])
+                b = self.normalize_html(new_data[key])
             else:
-                a = new_data[key]
-                b = original_session[key]
+                a = original_session[key]
+                b = new_data[key]
             if a != b:
                 self.logger.info(
                     "Session '%s' needs update because '%s' changed: '%s' !="

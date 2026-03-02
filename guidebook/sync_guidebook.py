@@ -665,7 +665,6 @@ class GuideBook:
         self.sessions_by_name[name] = s
         operation = "updated" if update else "added"
         self.stats.increment("sessions", operation)
-        sys.exit(0)
 
     def normalize_html(self, html):
         """

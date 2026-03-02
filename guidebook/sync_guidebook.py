@@ -635,12 +635,16 @@ class GuideBook:
             return
         name = session["Name"]
         start, end = self.get_times(session)
+        spkr_line = (
+            f'<p><strong>Speakers</strong>: {session["Speakers"]}</strong></p>'
+        )
+        assembled_desc = spkr_line + session["LongAbstract"]
         data = {
             "name": name,
             "start_time": start,
             "end_time": end,
             "guide": self.guide,
-            "description_html": session["LongAbstract"],
+            "description_html": assembled_desc,
             "schedule_tracks": self.get_id("tracks", session),
             "locations": self.get_id("rooms", session),
             "add_to_schedule": True,
@@ -661,6 +665,7 @@ class GuideBook:
         self.sessions_by_name[name] = s
         operation = "updated" if update else "added"
         self.stats.increment("sessions", operation)
+        sys.exit(0)
 
     def normalize_html(self, html):
         """

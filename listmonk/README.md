@@ -1,7 +1,5 @@
 # Listmonk syncing script
 
-**NOTE**: This repo is currently not the live copy, but will be soon.
-
 This script keeps attendee registration data in sync with our
 listmonk instance.
 

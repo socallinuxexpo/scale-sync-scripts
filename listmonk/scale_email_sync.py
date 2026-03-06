@@ -1,21 +1,25 @@
 #!/usr/bin/python3
 
-import click
-import csv
-import json
-import logging
-import MySQLdb
-import os
-import requests
-import sys
-import time
-import yaml
 from datadog_api_client import ApiClient, Configuration
 from datadog_api_client.v2.api.metrics_api import MetricsApi
 from datadog_api_client.v2.model.metric_intake_type import MetricIntakeType
 from datadog_api_client.v2.model.metric_payload import MetricPayload
 from datadog_api_client.v2.model.metric_point import MetricPoint
 from datadog_api_client.v2.model.metric_series import MetricSeries
+import MySQLdb
+import click
+import csv
+import fcntl
+import json
+import logging
+import os
+import requests
+import sys
+import time
+import yaml
+
+MAX_LOCK_TRIES = 5
+LOCK_RETRY_DELAY = 30
 
 
 def load_config(config_file):
@@ -450,6 +454,30 @@ class ListMonk:
                 )
 
 
+def acquire_lock(lockfile):
+    logging.debug("Acquiring lock on %s", lockfile)
+    lock_fh = open(lockfile, "a")
+    attempts = MAX_LOCK_TRIES
+    while attempts > 0:
+        try:
+            fcntl.lockf(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            logging.info("Lock acquired")
+            return lock_fh
+        except IOError:
+            logging.warning(
+                "Another instance is running. "
+                f"Retrying in {LOCK_RETRY_DELAY} seconds..."
+            )
+            time.sleep(LOCK_RETRY_DELAY)
+            attempts -= 1
+    return None
+
+
+def release_lock(lock_fh):
+    logging.info("Releasing lock")
+    lock_fh.close()
+
+
 @click.command()
 @click.option("--dry-run", "-n", is_flag=True, help="Run in dry-run mode")
 @click.option(
@@ -477,12 +505,22 @@ class ListMonk:
     default="/etc/scale_email_sync.yml",
     help="Path to YAML configuration file",
 )
-def main(dry_run, log_level, reg_file, remove, prod_lists, config):
+@click.option(
+    "--lock-file",
+    default="/tmp/scale_email_sync.lock",
+    help="Path to lockfile",
+)
+def main(dry_run, log_level, reg_file, remove, prod_lists, config, lock_file):
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="[%(asctime)s] %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    lock_fh = acquire_lock(lock_file)
+    if lock_fh is None:
+        logging.error("Failed to acquire lock, exiting.")
+        sys.exit(1)
 
     # Load configuration
     logging.info(f"Loading configuration from {config}...")
@@ -502,6 +540,8 @@ def main(dry_run, log_level, reg_file, remove, prod_lists, config):
 
     # Report stats to Datadog
     lm.report_stats_to_datadog()
+
+    release_lock(lock_fh)
 
 
 if __name__ == "__main__":

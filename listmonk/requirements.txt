@@ -1,0 +1,5 @@
+click>=8.1.0
+mysqlclient>=2.2.0
+requests>=2.31.0
+pyyaml>=6.0
+datadog-api-client>=2.0.0

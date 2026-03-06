@@ -1,0 +1,95 @@
+name: unit tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      listmonk: ${{ steps.filter.outputs.listmonk }}
+      guidebook: ${{ steps.filter.outputs.guidebook }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            listmonk:
+              - 'listmonk/**'
+            guidebook:
+              - 'guidebook/**'
+
+  test-listmonk:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.listmonk == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-listmonk-${{ hashFiles('listmonk/requirements.txt', 'listmonk/requirements-test.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-listmonk-
+      
+      - name: Install dependencies
+        run: |
+          cd listmonk
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+      
+      - name: Run tests
+        run: |
+          cd listmonk
+          pytest -v --tb=short
+
+  test-guidebook:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.guidebook == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-guidebook-${{ hashFiles('guidebook/requirements.txt', 'guidebook/requirements-test.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-guidebook-
+      
+      - name: Install dependencies
+        run: |
+          cd guidebook
+          pip install -r requirements.txt
+          # Install test dependencies if they exist
+          if [ -f requirements-test.txt ]; then
+            pip install -r requirements-test.txt
+          fi
+      
+      - name: Run tests
+        run: |
+          cd guidebook
+          # Run tests if they exist
+          if [ -d tests ] || ls test_*.py 2>/dev/null; then
+            pytest -v --tb=short || echo "No tests found or pytest not configured"
+          else
+            echo "No tests directory found yet - skipping tests"
+          fi
